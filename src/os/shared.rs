@@ -5,11 +5,12 @@ use ::pnet::datalink::DataLinkReceiver;
 use ::pnet::datalink::{self, Config, NetworkInterface};
 use ::std::io::{self, ErrorKind, Write};
 use ::tokio::runtime::Runtime;
+use trust_dns_resolver::TokioHandle;
 
 use ::std::net::Ipv4Addr;
 use ::std::time;
 
-use crate::os::errors::GetInterfaceErrorKind;
+use crate::os::errors::GetInterfaceError;
 
 #[cfg(target_os = "linux")]
 use crate::os::linux::get_open_sockets;
@@ -34,7 +35,7 @@ impl Iterator for TerminalEvents {
 
 pub(crate) fn get_datalink_channel(
     interface: &NetworkInterface,
-) -> Result<Box<dyn DataLinkReceiver>, GetInterfaceErrorKind> {
+) -> Result<Box<dyn DataLinkReceiver>, GetInterfaceError> {
     let config = Config {
         read_timeout: Some(time::Duration::new(1, 0)),
         read_buffer_size: 65536,
@@ -43,15 +44,15 @@ pub(crate) fn get_datalink_channel(
 
     match datalink::channel(interface, config) {
         Ok(Ethernet(_tx, rx)) => Ok(rx),
-        Ok(_) => Err(GetInterfaceErrorKind::OtherError(format!(
+        Ok(_) => Err(GetInterfaceError::OtherError(format!(
             "{}: Unsupported interface type",
             interface.name
         ))),
         Err(e) => match e.kind() {
-            ErrorKind::PermissionDenied => Err(GetInterfaceErrorKind::PermissionError(
+            ErrorKind::PermissionDenied => Err(GetInterfaceError::PermissionError(
                 interface.name.to_owned(),
             )),
-            _ => Err(GetInterfaceErrorKind::OtherError(format!(
+            _ => Err(GetInterfaceError::OtherError(format!(
                 "{}: {}",
                 &interface.name, e
             ))),
@@ -85,7 +86,7 @@ where
     I: Iterator<
         Item = (
             &'a NetworkInterface,
-            Result<Box<dyn DataLinkReceiver>, GetInterfaceErrorKind>,
+            Result<Box<dyn DataLinkReceiver>, GetInterfaceError>,
         ),
     >,
 {
@@ -97,7 +98,7 @@ where
         |acc, (_, elem)| {
             if let Some(iface_error) = elem.err() {
                 match iface_error {
-                    GetInterfaceErrorKind::PermissionError(interface_name) => {
+                    GetInterfaceError::PermissionError(interface_name) => {
                         if let Some(prev_interface) = acc.permission {
                             return UserErrors {
                                 permission: Some(format!("{}, {}", prev_interface, interface_name)),
@@ -151,12 +152,12 @@ pub fn get_input(
     interface_name: &Option<String>,
     resolve: bool,
     dns_server: &Option<Ipv4Addr>,
-) -> Result<OsInputOutput, failure::Error> {
+) -> Result<OsInputOutput, anyhow::Error> {
     let network_interfaces = if let Some(name) = interface_name {
-        match get_interface(&name) {
+        match get_interface(name) {
             Some(interface) => vec![interface],
             None => {
-                failure::bail!("Cannot find interface {}", name);
+                anyhow::bail!("Cannot find interface {}", name);
                 // the homebrew formula relies on this wording, please be careful when changing
             }
         }
@@ -195,24 +196,23 @@ pub fn get_input(
     if available_network_frames.is_empty() {
         let all_errors = collect_errors(network_frames.clone());
         if !all_errors.is_empty() {
-            failure::bail!(all_errors);
+            anyhow::bail!(all_errors);
         }
 
-        failure::bail!("Failed to find any network interface to listen on.");
+        anyhow::bail!("Failed to find any network interface to listen on.");
     }
 
     let keyboard_events = Box::new(TerminalEvents);
     let write_to_stdout = create_write_to_stdout();
     let dns_client = if resolve {
-        let mut runtime = Runtime::new()?;
-        let resolver =
-            match runtime.block_on(dns::Resolver::new(runtime.handle().clone(), dns_server)) {
-                Ok(resolver) => resolver,
-                Err(err) => failure::bail!(
-                    "Could not initialize the DNS resolver. Are you offline?\n\nReason: {:?}",
-                    err
-                ),
-            };
+        let runtime = Runtime::new()?;
+        let resolver = match runtime.block_on(dns::Resolver::new(TokioHandle, dns_server)) {
+            Ok(resolver) => resolver,
+            Err(err) => anyhow::bail!(
+                "Could not initialize the DNS resolver. Are you offline?\n\nReason: {:?}",
+                err
+            ),
+        };
         let dns_client = dns::Client::new(resolver, runtime)?;
         Some(dns_client)
     } else {
