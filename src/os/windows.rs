@@ -21,7 +21,7 @@ pub(crate) fn get_open_sockets() -> OpenSockets {
         for si in sockets_info {
             let mut procname = String::new();
             for pid in si.associated_pids {
-                if let Some(process) = sysinfo.get_process(pid as Pid) {
+                if let Some(process) = sysinfo.process(pid as Pid) {
                     procname = String::from(process.name());
                     break;
                 }
